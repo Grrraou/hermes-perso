@@ -1,0 +1,182 @@
+# Isolated Hermes Agent — official image, no host home / Docker socket.
+#
+#   make init && make setup && make up
+#
+# Uses the same Docker Desktop engine as the other WSL compose stacks.
+# Hermes state is the bind mount ./data → /opt/data. `make down`,
+# `make build`, and `make restart` never delete it. Only `make destroy`
+# does (after you type "destroy"). Do not add `down --volumes` here.
+
+name: hermes-perso
+
+services:
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    # Do not auto-start at boot. Use `make up` / `make down`.
+    restart: "no"
+    command: ["gateway", "run"]
+
+    ports:
+      # OpenAI-compatible API + health (needs API_SERVER_* below)
+      - "${HERMES_BIND_IP:-0.0.0.0}:${API_SERVER_PORT:-8642}:8642"
+      # Web dashboard + Hermes Desktop remote gateway
+      - "${HERMES_BIND_IP:-0.0.0.0}:${HERMES_DASHBOARD_PORT:-9119}:9119"
+
+    volumes:
+      # Only this project folder is visible as Hermes home. Do not mount
+      # $HOME, ~/.ssh, or /var/run/docker.sock — those leak the host.
+      - ./data:/opt/data
+      # Populate agent source for hermes-webui (read-only on that service).
+      - hermes-agent-src:/opt/hermes
+
+    environment:
+      HERMES_UID: ${HERMES_UID:-1000}
+      HERMES_GID: ${HERMES_GID:-1000}
+
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: "0.0.0.0"
+      HERMES_DASHBOARD_PORT: ${HERMES_DASHBOARD_PORT:-9119}
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_BASIC_AUTH_USERNAME}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_BASIC_AUTH_SECRET}
+
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_PORT: ${API_SERVER_PORT:-8642}
+      API_SERVER_KEY: ${API_SERVER_KEY}
+      API_SERVER_CORS_ORIGINS: ${API_SERVER_CORS_ORIGINS:-*}
+
+    extra_hosts:
+      # Reach a model server on the host (Ollama, vLLM) without host networking.
+      # Inside Hermes config use http://host.docker.internal:<port>/v1
+      - "host.docker.internal:host-gateway"
+
+    shm_size: "1gb"
+    mem_limit: ${HERMES_MEM_LIMIT:-4g}
+    cpus: ${HERMES_CPUS:-2.0}
+    pids_limit: 512
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # s6-overlay remaps UID/GID, drops to the hermes user, and supervises children
+      - CHOWN
+      - SETUID
+      - SETGID
+      - FOWNER
+      - DAC_OVERRIDE
+      - KILL
+
+    networks:
+      - hermes
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:8642/health >/dev/null || exit 1",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  # Local Whisper for the WebUI mic. Not published to the host.
+  hermes-stt:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-stt
+    restart: "no"
+    user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
+    entrypoint: ["/opt/hermes/.venv/bin/python3", "/opt/stt_server.py"]
+    volumes:
+      - ./data:/opt/data
+      - ./scripts/local_stt_server.py:/opt/stt_server.py:ro
+      - hermes-agent-src:/opt/hermes:ro
+    environment:
+      HOME: /opt/data
+      HERMES_HOME: /opt/data
+      HF_HOME: /opt/data/.cache/huggingface
+      HERMES_LAZY_INSTALL_TARGET: /opt/data/lazy-packages
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+    networks:
+      - hermes
+    mem_limit: ${HERMES_STT_MEM_LIMIT:-2g}
+    cpus: ${HERMES_STT_CPUS:-2.0}
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    restart: "no"
+    entrypoint: ["/bin/bash", "/hooks/webui-entrypoint.sh"]
+    depends_on:
+      hermes:
+        condition: service_healthy
+      hermes-stt:
+        condition: service_healthy
+
+    ports:
+      - "${HERMES_BIND_IP:-0.0.0.0}:${HERMES_WEBUI_PORT:-8787}:8787"
+
+    volumes:
+      - ./data:/home/hermeswebui/.hermes
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
+      # Hermes CLI already writes under ./data/home. Keep WebUI on the same tree
+      # so attachments and projects are visible in both UIs.
+      - ./data/home:/workspace
+      - ./scripts/webui-entrypoint.sh:/hooks/webui-entrypoint.sh:ro
+      - ./scripts/hermes_webui_stt.py:/hooks/hermes_webui_stt.py:ro
+
+    environment:
+      WANTED_UID: ${HERMES_UID:-1000}
+      WANTED_GID: ${HERMES_GID:-1000}
+      HERMES_HOME: /home/hermeswebui/.hermes
+      HERMES_SKIP_CHMOD: "1"
+      HERMES_WEBUI_HOST: "0.0.0.0"
+      HERMES_WEBUI_PORT: "8787"
+      HERMES_WEBUI_STATE_DIR: /home/hermeswebui/.hermes/webui
+      HERMES_WEBUI_DEFAULT_WORKSPACE: /workspace
+      HERMES_WEBUI_PASSWORD: ${HERMES_WEBUI_PASSWORD:-${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}}
+      HERMES_API_URL: http://hermes:8642
+      HERMES_WEBUI_CHAT_BACKEND: gateway
+      HERMES_WEBUI_GATEWAY_BASE_URL: http://hermes:8642
+      HERMES_WEBUI_GATEWAY_API_KEY: ${API_SERVER_KEY}
+      HERMES_WEBUI_STT_URL: http://hermes-stt:8765
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    mem_limit: ${HERMES_WEBUI_MEM_LIMIT:-1g}
+    cpus: ${HERMES_WEBUI_CPUS:-1.0}
+    pids_limit: 256
+
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - hermes
+
+networks:
+  hermes:
+    driver: bridge
+    name: hermes-isolated
+
+volumes:
+  hermes-agent-src:

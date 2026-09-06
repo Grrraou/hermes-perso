@@ -27,12 +27,18 @@ services:
       # Only this project folder is visible as Hermes home. Do not mount
       # $HOME, ~/.ssh, or /var/run/docker.sock — those leak the host.
       - ./data:/opt/data
+      # Same tree under the paths WebUI puts in chat (attachments + workspace).
+      # Without these, Hermes sees /home/hermeswebui/... and /workspace as missing.
+      - ./data:/home/hermeswebui/.hermes
+      - ./data/home:/workspace
       # Populate agent source for hermes-webui (read-only on that service).
       - hermes-agent-src:/opt/hermes
 
     environment:
       HERMES_UID: ${HERMES_UID:-1000}
       HERMES_GID: ${HERMES_GID:-1000}
+      # realpath() of the alias mounts is not /opt/data — allow writes there too.
+      HERMES_WRITE_SAFE_ROOT: /opt/data:/workspace:/home/hermeswebui/.hermes
 
       HERMES_DASHBOARD: "1"
       HERMES_DASHBOARD_HOST: "0.0.0.0"

@@ -83,6 +83,8 @@ French TTS is already downloaded: set `tts.piper.voice` to `fr_FR-siwis-medium` 
 
 WebUI mic (local Whisper): open [http://127.0.0.1:8787](http://127.0.0.1:8787) — not a LAN/`192.168` URL (browsers block the mic on plain HTTP). Click the mic, speak, **click the mic again to stop**. Text is transcribed after you stop; it is not live captions. First stop after startup can take ~15s while Whisper loads.
 
+Pasted/uploaded files are stored under `./data/webui/attachments/`. Hermes sees them at the WebUI path `/home/hermeswebui/.hermes/webui/attachments/...` (same folder, extra bind mount). Still only `./data` on the host.
+
 In the CLI: `/voice on`, `/voice tts`, `/voice off`. The Hermes container has no host microphone, so CLI push-to-talk may say there is no audio device. Voice-note files and the `text_to_speech` tool still work.
 
 ---
